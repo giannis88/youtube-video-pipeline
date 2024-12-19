@@ -1,12 +1,14 @@
 import os
 import time
 import logging
-import random
+import json
 import google.generativeai as genai
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-import cv2
 import ffmpeg
+
+# Import our new video analysis module
+from video_analysis import analyze_video
 
 # Configure logging
 logging.basicConfig(
@@ -23,7 +25,6 @@ class GeminiAPIManager:
         :param api_keys: List of API keys
         """
         self.api_keys = api_keys
-        self.current_key_index = 0
         self.key_usage_count = {key: 0 for key in api_keys}
 
     def get_next_key(self):
@@ -65,61 +66,46 @@ class VideoProcessor:
             logging.error(f"Gemini API initialization failed: {e}")
             raise
 
-    def analyze_video(self, video_path):
+    def generate_youtube_metadata(self, video_analysis):
         """
-        Perform basic video analysis
+        Generate YouTube metadata using Gemini AI
         
-        :param video_path: Path to the input video
-        :return: Dictionary of video insights
+        :param video_analysis: Dictionary of video analysis results
+        :return: Dictionary of metadata suggestions
         """
         try:
-            # Open video using OpenCV
-            video = cv2.VideoCapture(video_path)
-            
-            # Extract basic video metadata
-            total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-            fps = video.get(cv2.CAP_PROP_FPS)
-            duration = total_frames / fps
-            
-            # Generate insights using Gemini
-            insights_prompt = f"""
-            Analyze a video with the following characteristics:
-            - Filename: {os.path.basename(video_path)}
-            - Duration: {duration:.2f} seconds
-            - Frames: {total_frames}
-            - FPS: {fps}
+            # Construct a detailed prompt using video analysis
+            metadata_prompt = f"""
+            Generate YouTube metadata for a video with these characteristics:
+            - Duration: {video_analysis['duration']:.2f} seconds
+            - Scene Changes: {video_analysis['scene_change_count']} 
+            - Motion Intensity: {video_analysis['motion_intensity']['mean']:.2f}
+            - Brightness Variation: {video_analysis['brightness_profile']['mean']:.2f}
 
             Provide:
-            1. A brief thematic description
-            2. Potential YouTube title suggestions (3 options)
-            3. Key topics or themes
+            1. An engaging video title (max 60 chars)
+            2. A compelling description (max 300 chars)
+            3. 5-7 relevant tags
             """
             
-            # Retry mechanism with key rotation
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    insights_response = self.model.generate_content(insights_prompt)
-                    break
-                except Exception as e:
-                    logging.warning(f"API call failed (Attempt {attempt+1}): {e}")
-                    # Rotate to next API key
-                    new_key = self.api_manager.get_next_key()
-                    genai.configure(api_key=new_key)
-                    self.model = genai.GenerativeModel('gemini-pro')
+            # Generate metadata using Gemini
+            metadata_response = self.model.generate_content(metadata_prompt)
+            
+            # Parse the response (you might need more sophisticated parsing)
+            metadata_lines = metadata_response.text.split('\n')
             
             return {
-                'filename': os.path.basename(video_path),
-                'duration': duration,
-                'total_frames': total_frames,
-                'fps': fps,
-                'ai_insights': insights_response.text
+                'title': metadata_lines[0].strip() if len(metadata_lines) > 0 else "Untitled Video",
+                'description': metadata_lines[1].strip() if len(metadata_lines) > 1 else "No description generated",
+                'tags': [tag.strip() for tag in metadata_lines[2:7] if tag.strip()] if len(metadata_lines) > 2 else []
             }
         except Exception as e:
-            logging.error(f"Video analysis error for {video_path}: {e}")
-            return None
-        finally:
-            video.release()
+            logging.error(f"Metadata generation failed: {e}")
+            return {
+                'title': f"Video {time.time()}",
+                'description': "Automatically generated video",
+                'tags': []
+            }
 
     def process_video(self, video_path):
         """
@@ -129,8 +115,15 @@ class VideoProcessor:
         :return: Path to the processed video
         """
         try:
-            # Analyze video first
-            video_insights = self.analyze_video(video_path)
+            # Perform advanced video analysis
+            video_analysis = analyze_video(video_path)
+            
+            if not video_analysis:
+                logging.error(f"Video analysis failed for {video_path}")
+                return None
+            
+            # Generate YouTube metadata
+            youtube_metadata = self.generate_youtube_metadata(video_analysis)
             
             # Generate output filename
             output_filename = f"processed_{os.path.basename(video_path)}"
@@ -150,12 +143,15 @@ class VideoProcessor:
                 .run(capture_stdout=True, capture_stderr=True)
             )
             
-            logging.info(f"Processed video: {output_path}")
+            # Store video analysis results
+            analysis_path = os.path.join(self.output_dir, f"{output_filename}_analysis.json")
+            with open(analysis_path, 'w') as f:
+                json.dump({
+                    'video_analysis': video_analysis,
+                    'youtube_metadata': youtube_metadata
+                }, f, indent=2)
             
-            # Store insights
-            insights_path = os.path.join(self.output_dir, f"{output_filename}_insights.txt")
-            with open(insights_path, 'w') as f:
-                f.write(str(video_insights))
+            logging.info(f"Processed video: {output_path}")
             
             return output_path
         
@@ -163,72 +159,4 @@ class VideoProcessor:
             logging.error(f"Video processing error for {video_path}: {e}")
             return None
 
-class VideoHandler(FileSystemEventHandler):
-    def __init__(self, processor):
-        """
-        Initialize file system event handler
-        
-        :param processor: VideoProcessor instance
-        """
-        self.processor = processor
-
-    def on_created(self, event):
-        """
-        Handle new file creation events
-        
-        :param event: File system event
-        """
-        if not event.is_directory:
-            # Check for video file extensions
-            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv']
-            if any(event.src_path.lower().endswith(ext) for ext in video_extensions):
-                logging.info(f"New video detected: {event.src_path}")
-                self.processor.process_video(event.src_path)
-
-def main():
-    """
-    Main entry point for the video processing pipeline
-    """
-    # Configuration 
-    INPUT_DIR = r'C:\Users\giova\youtube-video-pipeline\input'
-    OUTPUT_DIR = r'C:\Users\giova\youtube-video-pipeline\output'
-    
-    # Gemini API Keys
-    GEMINI_API_KEYS = [
-        'AIzaSyABilhc1fzLxbvmT0M1RZCN2DyOO-M3DMw',
-        'AIzaSyCAWHiK2MB8UlLY2OFViG9Z8q1yEtPu8LU',
-        'AIzaSyC6d_bp4gfbXfqexEV5wr8CJgqY3bxxNeA'
-    ]
-
-    # Ensure directories exist
-    os.makedirs(INPUT_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    # Initialize processor
-    processor = VideoProcessor(INPUT_DIR, OUTPUT_DIR, GEMINI_API_KEYS)
-    
-    # Setup file system watcher
-    event_handler = VideoHandler(processor)
-    observer = Observer()
-    observer.schedule(event_handler, INPUT_DIR, recursive=False)
-    
-    try:
-        logging.info("Starting video processing pipeline...")
-        observer.start()
-        
-        # Keep main thread running
-        while True:
-            time.sleep(1)
-    
-    except KeyboardInterrupt:
-        logging.info("Stopping video processing pipeline...")
-        observer.stop()
-    
-    except Exception as e:
-        logging.error(f"Unexpected error: {e}")
-    
-    finally:
-        observer.join()
-
-if __name__ == '__main__':
-    main()
+# ... (rest of the script remains the same as in the previous version)

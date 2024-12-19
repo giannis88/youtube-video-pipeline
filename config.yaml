@@ -1,0 +1,25 @@
+# Video Processing Pipeline Configuration
+
+input_directory: ./input
+output_directory: ./output
+
+logging:
+  level: INFO
+  file: video_pipeline.log
+
+video_processing:
+  target_resolution: 
+    - 1280
+    - 720
+  crf: 23
+  preset: medium
+
+ai:
+  api_keys: 
+    - AIzaSyABilhc1fzLxbvmT0M1RZCN2DyOO-M3DMw
+    - AIzaSyCAWHiK2MB8UlLY2OFViG9Z8q1yEtPu8LU
+    - AIzaSyC6d_bp4gfbXfqexEV5wr8CJgqY3bxxNeA
+  
+  rate_limit:
+    requests_per_minute: 15
+    total_requests_per_day: 1500
