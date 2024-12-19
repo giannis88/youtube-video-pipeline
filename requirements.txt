@@ -1,0 +1,4 @@
+google-generativeai
+watchdog
+opencv-python
+ffmpeg-python
